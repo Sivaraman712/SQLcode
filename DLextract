@@ -1,4 +1,4 @@
-DECLARE @ID INT = 1; -- Change this to the desired deadlock report ID
+DECLARE @ID INT = 10; -- Change this to the desired deadlock report ID
 
 WITH Deadlock AS (
     SELECT XMLREPORT
@@ -21,8 +21,8 @@ ProcessFrames AS (
     CROSS APPLY P.nodes('executionStack/frame') AS FS(F)
 )
 SELECT 
-    SPName,
-    QueryText,
+    PF.SPName,
+    PF.QueryText,
     CASE 
         WHEN PF.ProcessID = VP.VictimID THEN 'Victim'
         ELSE 'Waiter'
