@@ -1,0 +1,33 @@
+-- Extract victim and waiter SPs and queries from one deadlock XML
+WITH Deadlock AS (
+    SELECT TOP 1 EVENTTIME, XMLREPORT
+    FROM DBADB.dbo.DL_REPORT_XML_DATA
+    ORDER BY EVENTTIME DESC
+),
+VictimProcess AS (
+    SELECT 
+        p.value('@id', 'VARCHAR(100)') AS ProcessID
+    FROM Deadlock
+    CROSS APPLY XMLREPORT.nodes('/event/data/value/deadlock/victim') AS V(p)
+),
+ExecutionFrames AS (
+    SELECT 
+        proc.value('@procname', 'NVARCHAR(200)') AS SPName,
+        proc.value('text()[1]', 'NVARCHAR(MAX)') AS QueryText,
+        process.value('@id', 'VARCHAR(100)') AS ProcessID
+    FROM Deadlock
+    CROSS APPLY XMLREPORT.nodes('/event/data/value/deadlock/process-list/process') AS P(process)
+    CROSS APPLY process.nodes('executionStack/frame') AS F(proc)
+)
+SELECT 
+    D.EVENTTIME,
+    EF.SPName,
+    EF.QueryText,
+    CASE 
+        WHEN EF.ProcessID = VP.ProcessID THEN 'Victim'
+        ELSE 'Waiter'
+    END AS Role
+FROM Deadlock D
+JOIN ExecutionFrames EF ON 1=1
+JOIN VictimProcess VP ON 1=1
+ORDER BY Role, SPName;
