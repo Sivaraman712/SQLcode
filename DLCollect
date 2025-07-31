@@ -1,0 +1,5 @@
+select top 100 timestamp_utc at time zone 'UTC' at time zone 'India Standard Time',
+ef.event_data.value('(/event/data/value/deadlock/process-list/process/executionStack/frame/@procname)[1]','nvarchar(200)') as SPName,
+ef.event_data.value('(/event/data/value/deadlock/process-list/process/executionStack/frame/text()) [1]','nvarchar(200)') as QryText,
+from sys.fn_xe_file_target_read_file('system_health".xel',NULL, NULL, NULL) ef
+where ef.object_name='xml_deadlock_report' and CAST(ef.timestamp_utc AS DATETIME2(7)) > DATEADD(DAY, -1, GETUTCDATE());
