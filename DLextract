@@ -1,33 +1,31 @@
--- Extract victim and waiter SPs and queries from one deadlock XML
+DECLARE @ID INT = 1; -- Change this to the desired deadlock report ID
+
 WITH Deadlock AS (
-    SELECT TOP 1 EVENTTIME, XMLREPORT
+    SELECT XMLREPORT
     FROM DBADB.dbo.DL_REPORT_XML_DATA
-    ORDER BY EVENTTIME DESC
+    WHERE ID = @ID
 ),
 VictimProcess AS (
     SELECT 
-        p.value('@id', 'VARCHAR(100)') AS ProcessID
+        V.value('@id', 'VARCHAR(100)') AS VictimID
     FROM Deadlock
-    CROSS APPLY XMLREPORT.nodes('/event/data/value/deadlock/victim') AS V(p)
+    CROSS APPLY XMLREPORT.nodes('/event/data/value/deadlock/victim') AS VP(V)
 ),
-ExecutionFrames AS (
+ProcessFrames AS (
     SELECT 
-        proc.value('@procname', 'NVARCHAR(200)') AS SPName,
-        proc.value('text()[1]', 'NVARCHAR(MAX)') AS QueryText,
-        process.value('@id', 'VARCHAR(100)') AS ProcessID
+        P.value('@id', 'VARCHAR(100)') AS ProcessID,
+        F.value('@procname', 'NVARCHAR(200)') AS SPName,
+        F.value('text()[1]', 'NVARCHAR(MAX)') AS QueryText
     FROM Deadlock
-    CROSS APPLY XMLREPORT.nodes('/event/data/value/deadlock/process-list/process') AS P(process)
-    CROSS APPLY process.nodes('executionStack/frame') AS F(proc)
+    CROSS APPLY XMLREPORT.nodes('/event/data/value/deadlock/process-list/process') AS PL(P)
+    CROSS APPLY P.nodes('executionStack/frame') AS FS(F)
 )
 SELECT 
-    D.EVENTTIME,
-    EF.SPName,
-    EF.QueryText,
+    SPName,
+    QueryText,
     CASE 
-        WHEN EF.ProcessID = VP.ProcessID THEN 'Victim'
+        WHEN PF.ProcessID = VP.VictimID THEN 'Victim'
         ELSE 'Waiter'
     END AS Role
-FROM Deadlock D
-JOIN ExecutionFrames EF ON 1=1
-JOIN VictimProcess VP ON 1=1
-ORDER BY Role, SPName;
+FROM ProcessFrames PF
+CROSS JOIN VictimProcess VP;
