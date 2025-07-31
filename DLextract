@@ -9,7 +9,7 @@ VictimProcess AS (
     SELECT 
         V.value('@id', 'VARCHAR(100)') AS VictimID
     FROM Deadlock
-    CROSS APPLY XMLREPORT.nodes('/event/data/value/deadlock/victim') AS VP(V)
+    CROSS APPLY XMLREPORT.nodes('/event/data/value/deadlock/victim-list/victimProcess') AS VP(V)
 ),
 ProcessFrames AS (
     SELECT 
