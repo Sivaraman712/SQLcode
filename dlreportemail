@@ -1,0 +1,94 @@
+-- Step 1: Define Date Range
+DECLARE @yesterday NVARCHAR(19) = FORMAT(DATEADD(DAY,-1,GETDATE()), 'yyyy-MM-dd 14:00:00');
+DECLARE @today NVARCHAR(19) = FORMAT(GETDATE(), 'yyyy-MM-dd 14:00:00');
+
+-- Step 2: Extract and Process Deadlock Data
+WITH DeadlockEvents AS (
+    SELECT XMLREPORT AS DeadlockXML , ID ,EventTime
+    FROM DBADB.dbo.DL_REPORT_XML_DATA
+),
+Victim AS (
+    SELECT 
+        EventTime,
+        DeadlockXML,
+        V.value('@id', 'NVARCHAR(100)') AS VictimProcessID
+    FROM DeadlockEvents
+    CROSS APPLY DeadlockXML.nodes('/deadlock/victim-list/victimProcess') AS VP(V)
+),
+ProcessDetails AS (
+    SELECT 
+        D.EventTime,
+        d.DeadlockXML,
+        V.VictimProcessID,
+        P.value('@id', 'NVARCHAR(100)') AS ProcessID,
+        P.value('(inputbuf)[1]', 'NVARCHAR(MAX)') AS InputBuf,
+        (
+            SELECT STRING_AGG(F.value('@procname', 'NVARCHAR(200)'), ' -> ')
+            FROM P.nodes('executionStack/frame') AS FS(F)
+            WHERE F.value('@procname', 'NVARCHAR(200)') NOT IN ('unknown')
+        ) AS SPCallChain,
+        (
+            SELECT TOP 1 F.value('text()[1]', 'NVARCHAR(MAX)')
+            FROM P.nodes('executionStack/frame') AS FS(F)
+            ORDER BY F.value('@line', 'INT') DESC
+        ) AS FinalQuery,
+        R.value('@objectname', 'NVARCHAR(200)') AS LockedObject,
+        R.value('local-name(.)', 'NVARCHAR(100)') AS LockType,
+        D.ID
+    FROM Victim V
+    JOIN DeadlockEvents D ON D.EventTime = V.EventTime
+    CROSS APPLY D.DeadlockXML.nodes('/deadlock/process-list/process') AS PL(P)
+    OUTER APPLY D.DeadlockXML.nodes('/deadlock/resource-list/*') AS RL(R)
+),
+FinalReport AS (
+    SELECT 
+        EventTime,
+        MAX(CASE WHEN ProcessID = VictimProcessID THEN FinalQuery END) AS VictimQuery,
+        MAX(CASE WHEN ProcessID <> VictimProcessID THEN FinalQuery END) AS WaiterQuery,
+        MAX(CASE WHEN ProcessID = VictimProcessID THEN InputBuf END) AS VictimExecutedstmt,
+        MAX(CASE WHEN ProcessID <> VictimProcessID THEN InputBuf END) AS WaiterExecutedstmt,
+        MAX(CASE WHEN ProcessID = VictimProcessID THEN SPCallChain END) AS VictimSPChain,
+        MAX(CASE WHEN ProcessID <> VictimProcessID THEN SPCallChain END) AS WaiterSPChain,
+        MAX(CASE WHEN ProcessID = VictimProcessID THEN LockedObject END) AS DeadlockResource,
+        MAX(CASE WHEN ProcessID <> VictimProcessID THEN LockType END) AS LockType,
+        D.ID
+    FROM ProcessDetails D
+    GROUP BY EventTime, ID
+)
+
+-- Step 3: Insert into Temp Table
+SELECT * 
+INTO #DeadlockReport
+FROM FinalReport
+WHERE EventTime BETWEEN @yesterday AND @today
+ORDER BY EventTime;
+
+-- Step 4: Convert to HTML
+DECLARE @html NVARCHAR(MAX) = 
+    N'<html><body><h2>Deadlock Report</h2><table border="1" cellpadding="4" cellspacing="0">' +
+    N'<tr><th>EventTime</th><th>VictimQuery</th><th>WaiterQuery</th><th>VictimExecutedstmt</th><th>WaiterExecutedstmt</th>' +
+    N'<th>VictimSPChain</th><th>WaiterSPChain</th><th>DeadlockResource</th><th>LockType</th><th>ID</th></tr>' +
+    CAST((
+        SELECT 
+            td = EventTime, '',
+            td = VictimQuery, '',
+            td = WaiterQuery, '',
+            td = VictimExecutedstmt, '',
+            td = WaiterExecutedstmt, '',
+            td = VictimSPChain, '',
+            td = WaiterSPChain, '',
+            td = DeadlockResource, '',
+            td = LockType, '',
+            td = ID
+        FROM #DeadlockReport
+        FOR XML PATH('tr'), TYPE
+    ) AS NVARCHAR(MAX)) +
+    N'</table></body></html>';
+
+-- Step 5: Send Email via Database Mail
+EXEC msdb.dbo.sp_send_dbmail
+    @profile_name = 'YourDBMailProfileName',  -- Replace with your actual profile name
+    @recipients = 'recipient@example.com',    -- Replace with actual recipient
+    @subject = 'SQL Server Deadlock Report',
+    @body = @html,
+    @body_format = 'HTML';
