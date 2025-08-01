@@ -63,9 +63,12 @@ FROM FinalReport
 WHERE EventTime BETWEEN @yesterday AND @today
 ORDER BY EventTime;
 
--- Step 4: Convert to HTML
+-- Step 4: Convert to HTML with Header
 DECLARE @html NVARCHAR(MAX) = 
-    N'<html><body><h2>Deadlock Report</h2><table border="1" cellpadding="4" cellspacing="0">' +
+    N'<html><body>' +
+    N'<h2>SQL Server Deadlock Report</h2>' +
+    N'<p>This report lists deadlock events captured between <b>' + @yesterday + '</b> and <b>' + @today + '</b>.</p>' +
+    N'<table border="1" cellpadding="4" cellspacing="0">' +
     N'<tr><th>EventTime</th><th>VictimQuery</th><th>WaiterQuery</th><th>VictimExecutedstmt</th><th>WaiterExecutedstmt</th>' +
     N'<th>VictimSPChain</th><th>WaiterSPChain</th><th>DeadlockResource</th><th>LockType</th><th>ID</th></tr>' +
     CAST((
