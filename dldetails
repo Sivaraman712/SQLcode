@@ -1,28 +1,33 @@
+
+
+
+DECLARE @yesterday NVARCHAR(19) = FORMAT(DATEADD(DAY,-1,GETDATE()), 'yyyy-MM-dd 14:00:00');
+DECLARE @today NVARCHAR(19) = FORMAT(GETDATE(), 'yyyy-MM-dd 14:00:00');
 WITH DeadlockEvents AS (
-    SELECT 
-        CAST(event_data AS XML) AS DeadlockXML,
-        timestamp_utc AS EventTime
-    FROM sys.fn_xe_file_target_read_file(
-        'C:\...\system_health*.xel', NULL, NULL, NULL)
-    WHERE object_name = 'xml_deadlock_report'
+    SELECT XMLREPORT AS DeadlockXML , ID ,EventTime
+    FROM DBADB.dbo.DL_REPORT_XML_DATA
+
 ),
+
 Victim AS (
     SELECT 
         EventTime,
         DeadlockXML,
         V.value('@id', 'NVARCHAR(100)') AS VictimProcessID
     FROM DeadlockEvents
-    CROSS APPLY DeadlockXML.nodes('/event/data/value/deadlock/victim-list/victim') AS VP(V)
+    CROSS APPLY DeadlockXML.nodes('/deadlock/victim-list/victimProcess') AS VP(V)
 ),
 ProcessDetails AS (
     SELECT 
         D.EventTime,
+		d.DeadlockXML,
         V.VictimProcessID,
         P.value('@id', 'NVARCHAR(100)') AS ProcessID,
         P.value('(inputbuf)[1]', 'NVARCHAR(MAX)') AS InputBuf,
         (
             SELECT STRING_AGG(F.value('@procname', 'NVARCHAR(200)'), ' -> ')
             FROM P.nodes('executionStack/frame') AS FS(F)
+			where F.value('@procname', 'NVARCHAR(200)') not in ('unknown')
         ) AS SPCallChain,
         (
             SELECT TOP 1 F.value('text()[1]', 'NVARCHAR(MAX)')
@@ -30,34 +35,35 @@ ProcessDetails AS (
             ORDER BY F.value('@line', 'INT') DESC
         ) AS FinalQuery,
         R.value('@objectname', 'NVARCHAR(200)') AS LockedObject,
-        R.value('@mode', 'NVARCHAR(50)') AS LockMode,
-        R.value('@waitType', 'NVARCHAR(100)') AS WaitType,
-        R.value('@waitDuration', 'BIGINT') AS WaitDuration
+       		R.value('local-name(.)', 'NVARCHAR(100)') AS LockType,
+		D.ID
     FROM Victim V
     JOIN DeadlockEvents D ON D.EventTime = V.EventTime
-    CROSS APPLY D.DeadlockXML.nodes('/event/data/value/deadlock/process-list/process') AS PL(P)
-    OUTER APPLY D.DeadlockXML.nodes('/event/data/value/deadlock/resource-list/*') AS RL(R)
+    CROSS APPLY D.DeadlockXML.nodes('/deadlock/process-list/process') AS PL(P)
+    OUTER APPLY D.DeadlockXML.nodes('/deadlock/resource-list/*') AS RL(R)
 ),
 FinalReport AS (
     SELECT 
         EventTime,
+		MAX(CASE WHEN ProcessID = VictimProcessID THEN FinalQuery END) AS VictimQuery,
+		MAX(CASE WHEN ProcessID <> VictimProcessID THEN FinalQuery END) AS  WaiterQuery,
+
+		MAX(CASE WHEN ProcessID = VictimProcessID THEN InputBuf END) AS VictimExecutedstmt,
+		MAX(CASE WHEN ProcessID <> VictimProcessID THEN InputBuf END) AS WaiterExecutedstmt,
+
         MAX(CASE WHEN ProcessID = VictimProcessID THEN SPCallChain END) AS VictimSPChain,
-        MAX(CASE WHEN ProcessID = VictimProcessID THEN InputBuf END) AS VictimQuery,
-        MAX(CASE WHEN ProcessID = VictimProcessID THEN LockedObject END) AS VictimResource,
-        MAX(CASE WHEN ProcessID = VictimProcessID THEN LockMode END) AS VictimLockMode,
-        MAX(CASE WHEN ProcessID <> VictimProcessID THEN SPCallChain END) AS WaiterSPChain,
-        MAX(CASE WHEN ProcessID <> VictimProcessID THEN InputBuf END) AS WaiterQuery,
-        MAX(CASE WHEN ProcessID <> VictimProcessID THEN LockedObject END) AS WaiterResource,
-        MAX(CASE WHEN ProcessID <> VictimProcessID THEN LockMode END) AS WaiterLockMode,
-        MAX(CASE WHEN ProcessID <> VictimProcessID THEN WaitType END) AS WaitType,
-        MAX(CASE WHEN ProcessID <> VictimProcessID THEN WaitDuration END) AS WaitDuration,
-        MAX(D.DeadlockXML) AS DeadlockXML
+		MAX(CASE WHEN ProcessID <> VictimProcessID THEN SPCallChain END) AS WaiterSPChain,
+        MAX(CASE WHEN ProcessID = VictimProcessID THEN LockedObject END) AS DeadlockResource,
+        
+        
+        
+		
+        
+        MAX(CASE WHEN ProcessID <> VictimProcessID THEN LockType END) AS LockType,
+        
+       D.ID
     FROM ProcessDetails D
-    GROUP BY EventTime
+    GROUP BY EventTime,ID
 )
-INSERT INTO dbo.DeadlockReport (
-    EventTime, VictimSPChain, VictimQuery, VictimResource, VictimLockMode,
-    WaiterSPChain, WaiterQuery, WaiterResource, WaiterLockMode,
-    WaitType, WaitDuration, DeadlockXML
-)
-SELECT * FROM FinalReport;
+
+SELECT EventTime,VictimQuery,WaiterQuery,VictimExecutedstmt,WaiterExecutedstmt,VictimSPChain,WaiterSPChain,DeadlockResource,LockType,ID FROM FinalReport  where EVENTTIME between @yesterday and @today order by EventTime  ;
