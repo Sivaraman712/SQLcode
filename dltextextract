@@ -1,0 +1,33 @@
+DECLARE @ID INT = 10; -- Change this to the desired deadlock report ID
+
+WITH Deadlock AS (
+    SELECT XMLREPORT
+    FROM DBADB.dbo.DL_REPORT_XML_DATA
+    WHERE ID = @ID
+),
+VictimProcess AS (
+    SELECT 
+        V.value('@id', 'VARCHAR(100)') AS VictimID
+    FROM Deadlock
+    CROSS APPLY XMLREPORT.nodes('/event/data/value/deadlock/victim-list/victim') AS VP(V)
+),
+ProcessDetails AS (
+    SELECT 
+        P.value('@id', 'VARCHAR(100)') AS ProcessID,
+        P.value('(inputbuf)[1]', 'NVARCHAR(MAX)') AS InputBufQuery,
+        F.value('@procname', 'NVARCHAR(200)') AS SPName,
+        F.value('text()[1]', 'NVARCHAR(MAX)') AS ExecutionQuery
+    FROM Deadlock
+    CROSS APPLY XMLREPORT.nodes('/event/data/value/deadlock/process-list/process') AS PL(P)
+    CROSS APPLY P.nodes('executionStack/frame') AS FS(F)
+)
+SELECT 
+    PD.SPName,
+    PD.ExecutionQuery,
+    PD.InputBufQuery,
+    CASE 
+        WHEN VP.VictimID = PD.ProcessID THEN 'Victim'
+        ELSE 'Waiter'
+    END AS Role
+FROM ProcessDetails PD
+LEFT JOIN VictimProcess VP ON PD.ProcessID = VP.VictimID;
