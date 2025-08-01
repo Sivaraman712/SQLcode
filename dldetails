@@ -1,27 +1,9 @@
--- Step 1: Create a table to store parsed deadlock data
-CREATE TABLE dbo.DeadlockReport (
-    ID INT IDENTITY(1,1) PRIMARY KEY,
-    EventTime DATETIME2(3),
-    VictimProcessID NVARCHAR(100),
-    VictimSPName NVARCHAR(200),
-    VictimQuery NVARCHAR(MAX),
-    WaiterProcessID NVARCHAR(100),
-    WaiterSPName NVARCHAR(200),
-    WaiterQuery NVARCHAR(MAX),
-    LockedObject NVARCHAR(200),
-    LockMode NVARCHAR(50),
-    WaitType NVARCHAR(100),
-    WaitDuration BIGINT,
-    RawXML XML
-);
-
--- Step 2: Extract and parse deadlock data from system_health .xel files
 WITH DeadlockEvents AS (
-    SELECT CAST(event_data AS XML) AS DeadlockXML,
-           timestamp_utc AS EventTime
+    SELECT 
+        CAST(event_data AS XML) AS DeadlockXML,
+        timestamp_utc AS EventTime
     FROM sys.fn_xe_file_target_read_file(
-        'C:\Program Files\Microsoft SQL Server\MSSQLXX.MSSQLSERVER\MSSQL\Log\system_health*.xel',
-        NULL, NULL, NULL)
+        'C:\...\system_health*.xel', NULL, NULL, NULL)
     WHERE object_name = 'xml_deadlock_report'
 ),
 Victim AS (
@@ -32,41 +14,50 @@ Victim AS (
     FROM DeadlockEvents
     CROSS APPLY DeadlockXML.nodes('/event/data/value/deadlock/victim-list/victim') AS VP(V)
 ),
-Processes AS (
+ProcessDetails AS (
     SELECT 
         D.EventTime,
         V.VictimProcessID,
         P.value('@id', 'NVARCHAR(100)') AS ProcessID,
         P.value('(inputbuf)[1]', 'NVARCHAR(MAX)') AS InputBuf,
-        F.value('@procname', 'NVARCHAR(200)') AS SPName,
-        F.value('text()[1]', 'NVARCHAR(MAX)') AS FrameText,
+        (
+            SELECT STRING_AGG(F.value('@procname', 'NVARCHAR(200)'), ' -> ')
+            FROM P.nodes('executionStack/frame') AS FS(F)
+        ) AS SPCallChain,
+        (
+            SELECT TOP 1 F.value('text()[1]', 'NVARCHAR(MAX)')
+            FROM P.nodes('executionStack/frame') AS FS(F)
+            ORDER BY F.value('@line', 'INT') DESC
+        ) AS FinalQuery,
         R.value('@objectname', 'NVARCHAR(200)') AS LockedObject,
         R.value('@mode', 'NVARCHAR(50)') AS LockMode,
         R.value('@waitType', 'NVARCHAR(100)') AS WaitType,
-        R.value('@waitDuration', 'BIGINT') AS WaitDuration,
-        D.DeadlockXML
+        R.value('@waitDuration', 'BIGINT') AS WaitDuration
     FROM Victim V
     JOIN DeadlockEvents D ON D.EventTime = V.EventTime
     CROSS APPLY D.DeadlockXML.nodes('/event/data/value/deadlock/process-list/process') AS PL(P)
-    CROSS APPLY P.nodes('executionStack/frame') AS FS(F)
     OUTER APPLY D.DeadlockXML.nodes('/event/data/value/deadlock/resource-list/*') AS RL(R)
+),
+FinalReport AS (
+    SELECT 
+        EventTime,
+        MAX(CASE WHEN ProcessID = VictimProcessID THEN SPCallChain END) AS VictimSPChain,
+        MAX(CASE WHEN ProcessID = VictimProcessID THEN InputBuf END) AS VictimQuery,
+        MAX(CASE WHEN ProcessID = VictimProcessID THEN LockedObject END) AS VictimResource,
+        MAX(CASE WHEN ProcessID = VictimProcessID THEN LockMode END) AS VictimLockMode,
+        MAX(CASE WHEN ProcessID <> VictimProcessID THEN SPCallChain END) AS WaiterSPChain,
+        MAX(CASE WHEN ProcessID <> VictimProcessID THEN InputBuf END) AS WaiterQuery,
+        MAX(CASE WHEN ProcessID <> VictimProcessID THEN LockedObject END) AS WaiterResource,
+        MAX(CASE WHEN ProcessID <> VictimProcessID THEN LockMode END) AS WaiterLockMode,
+        MAX(CASE WHEN ProcessID <> VictimProcessID THEN WaitType END) AS WaitType,
+        MAX(CASE WHEN ProcessID <> VictimProcessID THEN WaitDuration END) AS WaitDuration,
+        MAX(D.DeadlockXML) AS DeadlockXML
+    FROM ProcessDetails D
+    GROUP BY EventTime
 )
 INSERT INTO dbo.DeadlockReport (
-    EventTime, VictimProcessID, VictimSPName, VictimQuery,
-    WaiterProcessID, WaiterSPName, WaiterQuery,
-    LockedObject, LockMode, WaitType, WaitDuration, RawXML
+    EventTime, VictimSPChain, VictimQuery, VictimResource, VictimLockMode,
+    WaiterSPChain, WaiterQuery, WaiterResource, WaiterLockMode,
+    WaitType, WaitDuration, DeadlockXML
 )
-SELECT 
-    EventTime,
-    VictimProcessID,
-    CASE WHEN ProcessID = VictimProcessID THEN SPName ELSE NULL END,
-    CASE WHEN ProcessID = VictimProcessID THEN InputBuf ELSE NULL END,
-    CASE WHEN ProcessID <> VictimProcessID THEN ProcessID ELSE NULL END,
-    CASE WHEN ProcessID <> VictimProcessID THEN SPName ELSE NULL END,
-    CASE WHEN ProcessID <> VictimProcessID THEN InputBuf ELSE NULL END,
-    LockedObject,
-    LockMode,
-    WaitType,
-    WaitDuration,
-    DeadlockXML
-FROM Processes;
+SELECT * FROM FinalReport;
