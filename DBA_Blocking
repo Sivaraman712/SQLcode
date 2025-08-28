@@ -14,7 +14,7 @@ CREATE TABLE #BlockingInfo (
 
 IF OBJECT_ID('dbadb..BlockedQueriesInfo') IS NULL
 
-CREATE TABLE dbadb..BlockedQueriesInfo (
+CREATE  TABLE dbadb..BlockedQueriesInfo (
     ServerName NVARCHAR(100),
     BlockedSessionID INT,
     StartTime DATETIME,
@@ -22,6 +22,7 @@ CREATE TABLE dbadb..BlockedQueriesInfo (
     WaitType NVARCHAR(50),
     BlockingSessionID INT,
     QueryWaiting NVARCHAR(max),
+    BlockingQuery NVARCHAR(max),
 	logdate datetime default getdate()
 );
 
@@ -36,21 +37,28 @@ CREATE TABLE dbadb..HeadBlockingInfo (
 	logdate datetime default getdate()
 ,is_closed tinyint DEFAULT 0);
 
-INSERT INTO dbadb..BlockedQueriesInfo (ServerName, BlockedSessionID, StartTime, WaitingInMinutes, WaitType, BlockingSessionID, QueryWaiting)
+INSERT INTO dbadb..BlockedQueriesInfo (ServerName, BlockedSessionID,QueryWaiting, StartTime, WaitingInMinutes, WaitType, BlockingSessionID, BlockingQuery)
 SELECT 
     DISTINCT @@SERVERNAME AS [Server Name], 
     b.session_id AS [Blocked Session ID], 
+    t.[text] AS [Query Waiting to Execute],
     r.start_time, 
+    
     (b.wait_duration_ms / 1000) / 60 AS [Waiting in Minutes],
-    b.wait_type AS [Wait Type], 
+    b.wait_type AS [Wait Type],
+    
     b.blocking_session_id AS [Blocking Session ID], 
-    t.[text] AS [Query Waiting to Execute]
+    t1.[text] AS [Blocking Queries]
 FROM 
     sys.dm_os_waiting_tasks b 
 INNER JOIN 
     sys.dm_exec_requests r ON r.session_id = b.session_id and r.session_id>50
+INNER JOIN 
+    sys.dm_exec_requests r1 ON r1.session_id = b.blocking_session_id and r1.session_id>50
 OUTER APPLY 
     sys.dm_exec_sql_text(r.sql_handle) t 
+OUTER APPLY 
+    sys.dm_exec_sql_text(r1.sql_handle) t1 
 WHERE 
     b.blocking_session_id <> 0 and b.blocking_session_id <>b.session_id ;
 
@@ -185,8 +193,11 @@ GROUP BY
     t.host_name, 
     t.login_name
 	HAVING 
-    DATEDIFF(SECOND, MAX(ses.last_request_start_time), GETDATE()) > 300
+    DATEDIFF(SECOND, MAX(ses.last_request_start_time), GETDATE()) > 10
 	order by duration desc;
+    
+
+    Select top 5 * from BlockedQueriesInfo where DATEDIFF(SECOND,logdate, GETDATE()) < 60 order by [WaitingInMinutes] desc
 
 SET ANSI_NULLS, QUOTED_IDENTIFIER OFF;
 GO
@@ -203,11 +214,14 @@ SET ANSI_NULLS, QUOTED_IDENTIFIER ON;
 
 -- Step 3: Generate HTML content from the blocking table
 DECLARE @HTML NVARCHAR(MAX);
+DECLARE @Blocked NVARCHAR(MAX);
+
 DECLARE @ServerName VARCHAR(200)
 select @ServerName = @@SERVERNAME;
 
 DECLARE @Subject NVARCHAR(256);
-SET @subject = N' ' + @ServerName + ' - Blocking Queries -> Open'; --Change 1
+SET @subject = N'Test ' + @ServerName + ' - Blocking Queries -> Open'; --Change 1
+
 
 
 -- Initialize HTML
@@ -220,7 +234,7 @@ SET @HTML = '<html>' +
 'th, td { padding: 12px; text-align: left; }' +
 'th { background-color: #008080; color: white; }' +
 'tr:nth-child(even) { background-color: #f2f2f2; }' +
-'tr:hover { background-color: #e9ecef; }' +
+'tr:hover { background-color: #3a3f5a; }' +
 'p { margin: 0 0 10px; }' +
 '</style>' +
 '</head>' +
@@ -229,6 +243,37 @@ SET @HTML = '<html>' +
 '<p>We have detected blocking queries on the <b>' + @ServerName + '</b> server which are currently affecting system performance.</p>' +
 '<p><strong>Summary of Impact:</strong></p>' +
 '<ul>';
+
+SET @Blocked= '<p>The following outlines the details of the top five blocked sessions:</p>' +
+'<table>' +
+'<thead>' +
+'<tr>' +
+'<th>Blocked SPID</th>' +
+'<th>Waiting Query Text</th>' +
+'<th>Blocking SPID</th>' +
+'<th>Blocking Query Text</th>' +
+'<th>WaitingInMinutes</th>' +
+'<th>WaitType </th>' +
+'<th>StartTime</th>' +
+'</tr>' +
+'</thead>' +
+'<tbody>' +
+(SELECT TOP (5)
+        '<tr>' +
+        '<td>' + CAST(b.BlockedSessionID AS NVARCHAR) + '</td>' +
+         '<td>' + LEFT(b.QueryWaiting, 300) + '</td>'  +
+        '<td>' + CAST(b.BlockingSessionID AS NVARCHAR) + '</td>' +
+        '<td>' + LEFT(b.BlockingQuery, 300) + '</td>' +
+       '<td>' +CAST( b.WaitingInMinutes AS NVARCHAR) + '</td>' +
+       '<td>' +CAST( b.WaitType AS NVARCHAR) + '</td>' +
+        '<td>' +CAST( b.StartTime AS NVARCHAR) + '</td>' +       
+        '</tr>'
+    FROM dbadb..BlockedQueriesInfo b
+    WHERE DATEDIFF(SECOND, b.logdate, GETDATE()) < 60
+	order by [WaitingInMinutes] desc
+    FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)') +
+'</tbody>' +
+'</table>' 
 
 -- Create the summary of blocking queries
 DECLARE @Summary NVARCHAR(MAX);
@@ -244,7 +289,7 @@ SELECT @Summary = (
     INNER JOIN sys.dm_exec_sessions ses ON s.head_blocker_session_id = ses.session_id
 	 WHERE DATEDIFF(SECOND, logdate, GETDATE()) < 60
     GROUP BY s.head_blocker_session_id, s.blocking_queries_count
-    HAVING DATEDIFF(SECOND, MAX(ses.last_request_start_time), GETDATE()) > 300
+    HAVING DATEDIFF(SECOND, MAX(ses.last_request_start_time), GETDATE()) > 10
     FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)');
 
 SET @HTML = @HTML + @Summary + '</ul>' +
@@ -277,12 +322,16 @@ SET @HTML = @HTML + @Summary + '</ul>' +
 	order by s.duration desc
     FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)') +
 '</tbody>' +
-'</table>' +
+'</table>' +'<br>'
+
+set @HTML=@HTML +@Blocked + 
+ 
+
 '<p>The query has been identified as causing significant blocking issues within the database. We recommend promptly reviewing the query to assess whether terminating it is necessary to maintain optimal performance.</p>' +
 '<p>Please let us know if you would like us to proceed with terminating these queries or if you’d prefer to allow them to complete their execution.</p>' +
 '<p>We are here to assist in resolving this issue.</p>' +
 '<p>Best Regards,</p>' +
-'<p>MSSQL DBA<br>Rapyder</p>' +  -- change 2
+'<p>MSSQL DBA<br></p>' +  -- change 2
 '</body>' +
 '</html>';
 
@@ -292,10 +341,13 @@ SET @HTML = @HTML + @Summary + '</ul>' +
 
 
 
+
+
+
 if(@HTML is not null)
 BEGIN
 EXEC msdb.dbo.Sp_send_dbmail
-@profile_name = '',     --Change 3 DBmail Profiler
+@profile_name = 'DBA',     --Change 3 DBmail Profiler
 @body = @HTML,
 @body_format ='html',
 @recipients = '',  -- change 4 Our mail or client mail
@@ -426,7 +478,7 @@ WHERE
 '<p>We appreciate your attention to these matters and are glad to report that performance has returned to normal.</p>' +
 '<p>If you have any questions or require further details, please do not hesitate to reach out.</p>' +
 '<p>Best Regards,</p>' +
-'<p>MSSQL DBA<br>Rapyder</p>' +  --Change 2
+'<p>MSSQL DBA<br></p>' +  --Change 2
 '</body>' +
 '</html>';
 
@@ -451,11 +503,11 @@ WHERE
 DECLARE @subject NVARCHAR(256);
 
 --Select @HTML_Closed;
- SET @subject = N' ' + @ServerName + ' - Blocking Queries -> Closed'; --Change 1
+ SET @subject = N'Test ' + @ServerName + ' - Blocking Queries -> Closed'; --Change 1
 IF (@HTML_Closed IS NOT NULL)
 BEGIN
 EXEC msdb.dbo.sp_send_dbmail
-@profile_name = '',     -- Change 3 DBMail Profiler
+@profile_name = 'DBA',     -- Change 3 DBMail Profiler
 @body = @HTML_Closed,
 @body_format = 'html',
 @recipients = '',
@@ -465,7 +517,6 @@ END
 
 go
 SET ANSI_NULLS, QUOTED_IDENTIFIER OFF;
-
 
 
 
