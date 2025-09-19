@@ -1,3 +1,0 @@
-select * from [dbo].[tbl_tranlog_11_08_2025] where reqdate between '2025-03-31' and '2025-04-30' and channel in ('POS','PG') and network ='MASTERCARD'
-Select * from tbl_tranlog where reqdate between '2025-05-01' and '2025-05-31' and channel in ('POS','PG') and network ='MASTERCARD'
-Select * from tbl_tranlog where reqdate between '2025-06-01' and '2025-07-01' and channel in ('POS','PG') and network ='MASTERCARD'
