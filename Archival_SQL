@@ -59,6 +59,8 @@ ALTER TABLE [dbo].[TBL_RETENTION_LOGS] ADD  DEFAULT (getdate()) FOR [EntryDate]
 GO
 
 
+
+
 USE [DBADB]
 GO
 SET ANSI_NULLS ON
@@ -67,7 +69,7 @@ SET QUOTED_IDENTIFIER ON
 GO
 
 
-CREATE   PROCEDURE [dbo].[DBA_Table_Archival]
+CREATE OR ALTER   PROCEDURE [dbo].[DBA_Table_Archival]
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -76,12 +78,12 @@ BEGIN
     -- 1. Declare Variables
     --===============================
     DECLARE @sSQL NVARCHAR(MAX);
-    DECLARE @SourceTableName SYSNAME = '[DBADB].[dbo].[table_live]';
-    DECLARE @DestinationTableName SYSNAME = '[DBADB].[dbo].[table_archival]';
-    DECLARE @filter NVARCHAR(MAX) ='CreatedOn <= (SELECT TOP 1 [CreatedOn] FROM [DBADB].[dbo].[table_live])'; 
+    DECLARE @SourceTableName SYSNAME = '[SampleLoad].[dbo].[CPUUtilisationdata]';
+    DECLARE @DestinationTableName SYSNAME = '[DBADB].[dbo].[CPUUtilisationdata]';
+    DECLARE @filter NVARCHAR(MAX) ='[Time] <= ''2025-04-22 00:00:00.000'''; 
 	
     DECLARE @ExecutionId UNIQUEIDENTIFIER = NEWID(); -- Unique run ID
-    DECLARE @filter_log NVARCHAR(MAX) = @filter + ' | RunId=' + CAST(@ExecutionId AS NVARCHAR(36));
+    DECLARE @filter_log NVARCHAR(MAX) = @filter ;
 
     DECLARE @ID INT;                     -- New IID_NEW for this run
     DECLARE @rCount BIGINT;              
@@ -117,7 +119,7 @@ BEGIN
 		*
         FROM ' + @SourceTableName + N' WITH (READPAST, ROWLOCK)
         WHERE ' + @filter + N'
-        ORDER BY CreatedOn
+        ORDER BY time
     )
     DELETE FROM CTE_ToDelete
     OUTPUT DELETED.* INTO ' + @DestinationTableName + N';' ;
@@ -173,7 +175,7 @@ BEGIN
     END
 
     -- Wait to avoid overwhelming live transactions
-    WAITFOR DELAY '00:00:10';
+    WAITFOR DELAY '00:00:02';
 
     -- Continue if rows still exist
     IF @rCount > 0 GOTO UPDATE_BATCH;
